@@ -65,7 +65,7 @@ class PopularHookPreprocessor:
             if chord_part is None:
                 # Opcional: podrías intentar hacer chordify() a toda la partitura como fallback
                 # score.chordify() si quieres, pero es más seguro descartar el archivo.
-                return None
+                return [None]
 
             # 4. ¡La clave! Aplicar Chordify solo sobre la pista de acordes
             chordified_part = chord_part.chordify()
@@ -73,11 +73,11 @@ class PopularHookPreprocessor:
             # 5. Extraer los acordes de la parte ya procesada
             chords = [element for element in chordified_part.recurse().getElementsByClass('Chord')]
                 
-            return chords if chords else None
+            return chords if chords else [None]
         
         except Exception as e:
             print(f"No se pudo procesar el archivo MIDI {os.path.basename(midi_path)}: {e}")
-            return None
+            return [None]
 
     def _chords_to_piano_roll(self, chord_sequence: list) -> np.ndarray:
         """Convierte una secuencia de N acordes de music21 a una matriz de piano roll."""
@@ -109,7 +109,13 @@ class PopularHookPreprocessor:
         all_sequences_pianoroll = []
         all_metadata = []    
         
-        for index, row in tqdm(target_df.iterrows(), total=target_df.shape[0]):
+        #for index, row in tqdm(target_df.iterrows(), total=target_df.shape[0]):
+        
+        # para recorrer X filas del dataframe
+        
+        subset_df = target_df.head(10)
+        for index, row in tqdm(subset_df.iterrows(), total=len(subset_df)):
+
             path_from_info = row.get('path', '')
             path_from_info = path_from_info[2:]
             
@@ -144,7 +150,16 @@ class PopularHookPreprocessor:
                 sequence = m21_chords[i:i + self.sequence_length]
                 
                 piano_roll_sequence = self._chords_to_piano_roll(sequence)
-                chord_symbol_sequence = [c.pitchedCommonName for c in sequence]
+                #chord_symbol_sequence = [c.pitchedCommonName for c in sequence]
+                
+                chord_symbol_sequence = []
+                
+                for c in sequence:
+                    try:                        
+                        symbol = music21.harmony.chordSymbolFromChord(c).figure
+                    except Exception as e:
+                        symbol = c.pitchNames  # No Chord
+                    chord_symbol_sequence.append(symbol)
                 
                 all_sequences_chords.append(chord_symbol_sequence)
                 all_sequences_pianoroll.append(np.array(piano_roll_sequence))
@@ -177,7 +192,7 @@ if __name__ == '__main__':
     # --- Configuración ---
     
     # Directorio raíz donde descomprimiste el dataset Popular Hook
-    DATASET_ROOT_PATH = '/mnt/c/Users/nehem/Desktop/Tesis/Data/MIDI/popular-hook'
+    DATASET_ROOT_PATH = '/home/neme/workspace/Data/MIDI/preprocced/Popular-hook'
     
     # Nombre del archivo de metadatos principal
     INFO_TABLES_FILENAME = 'info_tables.xlsx'
@@ -186,7 +201,7 @@ if __name__ == '__main__':
     INFO_TABLES_FILE_PATH = os.path.join(DATASET_ROOT_PATH, INFO_TABLES_FILENAME)
     
     # Ruta de salida para el archivo procesado de videojuegos
-    OUTPUT_PATH = '/mnt/c/Users/nehem/OneDrive - Universidad de Chile/Universidad/6to año/Data/MIDI/preprocced/Popular-hook/dataset_01.pkl' # Ruta para guardar el dataset procesado
+    OUTPUT_PATH = '/home/neme/workspace/Data/MIDI/preprocced/Popular-hook/dataset_01.pkl' # Ruta para guardar el dataset procesado
 
     # --- Ejecución ---
     try:

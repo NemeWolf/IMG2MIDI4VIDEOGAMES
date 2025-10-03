@@ -1,17 +1,3 @@
-"""
-Resumable preprocessor for the Chordonomicon dataset.
-
-This script is a non-destructive variant of `preproccesing_chordonomicon.py` that:
-- Keeps the original file untouched.
-- Limits windows per progression via `max_windows_per_progression` with dynamic stride.
-- Fixes batching (writes exactly `batch_size` samples per file, without re-slicing the full arrays).
-- Supports resume-from-checkpoint by original_id and number of windows already saved for that row.
-
-Outputs batches to: <save_path>/batch/dataset_01_<n>.pkl
-
-Adjust the constants in the __main__ section as needed.
-"""
-
 from __future__ import annotations
 
 import os
@@ -42,21 +28,21 @@ NOTES_FLAT = dict(zip(NOTES_LATIN_FLAT, NOTES_AMERICAN_FLAT))
 
 
 class ChordonomiconPreprocessorResumable:
-    """Preprocessor with dynamic window limiting and resume support."""
+    """Preprocesa el dataset Chordonomicon en batches, con capacidad de reanudación."""
 
-    def __init__(
-        self,
-        csv_path: str,
-        save_path: str,
-        chord_mapping_path: str,
-        degrees_mapping_path: str,
-        num_progressions: Optional[int] = 100000,
-        sequence_length: int = 16,
-        batch_size: int = 5000,
-        max_windows_per_progression: int = 10,
-        resume_from_original_id: Optional[int] = None,
-        resume_windows_done: int = 0,
-    ) -> None:
+    def __init__(self,
+                csv_path: str,  # Ruta al CSV de Chordonomicon
+                save_path: str, # Carpeta donde guardar los batches
+                chord_mapping_path: str, # Ruta al CSV de mapeo de acordes
+                degrees_mapping_path: str, # Ruta al CSV de mapeo de grados
+                num_progressions: Optional[int] = 100000, # Número de progresiones a procesar (None = todas)
+                sequence_length: int = 16, # Longitud de secuencia de acordes
+                batch_size: int = 5000, # Número de secuencias por batch
+                max_windows_per_progression: int = 10, # Máximo de ventanas por progresión
+                resume_from_original_id: Optional[int] = None, # original_id para reanudar (None = desde el inicio)
+                resume_windows_done: int = 0, # Número de ventanas ya procesadas en esa progresión
+            ) -> None:
+        
         self.csv_path = csv_path
         self.save_path = save_path
         self.num_progressions = num_progressions
@@ -78,6 +64,13 @@ class ChordonomiconPreprocessorResumable:
 
     # ------------------------ Loaders ------------------------
     def _load_chord_mapping(self, mapping_path: str) -> Dict[str, str]:
+        """
+        Carga el mapeo de acordes desde un CSV para notacion original a ChordSymbol compatible con music21.
+        args:
+            mapping_path: Ruta al archivo CSV con las columnas 'Original Symbol' y 'ChordSymbol_m21'.
+        returns:
+            Un diccionario que mapea símbolos originales a símbolos compatibles con music21.        
+        """
         df = pd.read_csv(mapping_path)
         return dict(
             zip(
@@ -87,17 +80,38 @@ class ChordonomiconPreprocessorResumable:
         )
 
     def _load_degrees_mapping(self, degrees_path: str) -> Dict[str, List[str]]:
+        """ 
+        Carga el mapeo de grados desde un CSV de cada tipo de acorde presente en el dataset. 
+        args:
+            degrees_path: Ruta al archivo CSV con las columnas 'Chords' y 'Notes'.
+        returns:
+            Un diccionario que mapea símbolos de acordes a listas de notas (grados).
+        """
         df = pd.read_csv(degrees_path)
         return dict(zip(df['Chords'], df['Notes'].apply(ast.literal_eval)))
 
     # ------------------------ Utilities ------------------------
     def _clean_chord_string(self, chords_text: str) -> List[str]:
+        """
+        Limpia y tokeniza una cadena de acordes.
+        """
         cleaned_text = re.sub(r'<[^>]+>', '', chords_text)
         cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
         return cleaned_text.split(' ')
 
     def _extract_chord_symbol(self, chord_txt: str, note: str) -> Tuple[str, str, str]:
+        """
+        Extrae el símbolo de tónica y calidad de un símbolo de acorde.
+        Dada la nota raiz, captura la tónica y el resto como calidad.
+        args:
+            chord_txt: Símbolo completo del acorde (e.g., 'doM7').
+            note: Nota raíz en notación latina (e.g., 'do').    
+        returns:
+            Una tupla (tónica, calidad, símbolo original).
+        """        
         tonic = ''
+        
+        # Detectar tónica en notación latina y convertir a americana
         for c in range(len(NOTES_AMERICAN)):
             if note == NOTES_LATIN[c]:
                 tonic = NOTES[note]
@@ -108,15 +122,26 @@ class ChordonomiconPreprocessorResumable:
             elif note == NOTES_LATIN_FLAT[c]:
                 tonic = NOTES_FLAT[note]
                 break
+                
+        # Extraer calidad
         symbol = chord_txt[len(tonic):]
         return tonic, symbol, chord_txt
 
     def _parse_single_chord(self, chord_str: str) -> Optional[harmony.ChordSymbol]:
-        # Split possible bass (slash chord)
+        """
+        Parsea un símbolo de acorde individual a un objeto music21 ChordSymbol.
+        args:
+            chord_str: Símbolo del acorde (e.g., 'doM7', 'solm7/b').
+        returns:
+            Un objeto harmony.ChordSymbol o None si no se puede parsear.
+        """
+        
+       # Separa baja si existe
         parts = chord_str.split('/')
         chord_txt = parts[0]
         bass_txt = parts[1] if len(parts) > 1 else ''
 
+        # Extrae tónica y calidad
         try:
             root_note, quality_txt, _ = self._extract_chord_symbol(
                 chord_txt, self.degrees_mapping[chord_txt][0]
@@ -124,48 +149,86 @@ class ChordonomiconPreprocessorResumable:
         except Exception:
             return None
 
-        # Adapt notation for music21
+        # Adaptar notación para music21
         root_note = root_note.replace('s', '#').replace('b', '-')
         bass_txt = bass_txt.replace('s', '#').replace('b', '-') if bass_txt else ''
 
+        # Mapear calidad usando el diccionario de mapeo cargado
         try:
             m21_quality = ast.literal_eval(self.chord_mapping[quality_txt])[0].replace("'", '')
-            final_symbol = root_note + m21_quality
+            final_symbol = root_note + m21_quality  # Reconstruir símbolo final
             if bass_txt:
-                final_symbol += '/' + bass_txt
+                final_symbol += '/' + bass_txt  # Añadir bajo si existe
+                
+            # Crear objeto ChordSymbol de music21
             return harmony.ChordSymbol(final_symbol)
         except Exception:
             return None
 
     def _analyze_key(self, chord_sequence: List[harmony.ChordSymbol]) -> Tuple[str, str, float]:
+        """
+        Analiza la tonalidad de una secuencia de acordes usando music21.
+        args:
+            chord_sequence: Lista de objetos harmony.ChordSymbol.
+        returns:
+            Una tupla (tónica, modo, coeficiente de correlación).
+        """
+        # Construir un stream temporal
         s = stream.Stream()
+
+        # El metodo analyze tiene mejores resultados con objetos music21.chord.Chord que con 
+        # music21.harmony.ChordSymbol, por lo que se convierten a music21.chord.Chord antes de analizar.
+        
+        # Añadir acordes al stream
         for cobj in chord_sequence:
             if cobj is None:
                 continue
-            s.append(chord.Chord(cobj.pitches))
+            s.append(chord.Chord(cobj.pitches))          
+            
         try:
+            # Analizar la tonalidad
             k = s.analyze('key')
             return k.tonic.name, k.mode, k.correlationCoefficient
         except Exception:
             return 'Unknown', 'unknown', float('nan')
 
     def _to_piano_roll(self, chord_obj: harmony.ChordSymbol) -> np.ndarray:
-        roll = np.zeros(self.piano_roll_size, dtype=int)
+        """
+        Convierte un objeto harmony.ChordSymbol a una representación de piano roll binaria.
+        args:
+            chord_obj: Un objeto harmony.ChordSymbol.
+        returns:
+            Un array numpy de tamaño (84,) con 1s en las posiciones de las notas presentes.
+        """
+        
+        roll = np.zeros(self.piano_roll_size, dtype=int)    # Inicializar piano roll vacío
+        
         if chord_obj is not None:
-            for p in chord_obj.pitches:
-                midi_note = p.midi
+            for p in chord_obj.pitches:  # Iterar sobre las notas del acorde
+                midi_note = p.midi 
+                # Mapear a rango 24-107 (84 notas)
                 if self.min_midi_note <= midi_note < self.min_midi_note + self.piano_roll_size:
                     roll[midi_note - self.min_midi_note] = 1
         return roll
 
     # ------------------------ Resume helpers ------------------------
     def _next_existing_batch_index(self) -> int:
+        """
+        Encuentra el índice del último batch existente en disco para continuar la numeración.
+        returns:
+            El índice del último batch existente, o 0 si no hay batches.
+        """
+        # Buscar archivos batch existentes
         batch_dir = os.path.join(self.save_path, 'batch')
         os.makedirs(batch_dir, exist_ok=True)
         files = glob.glob(os.path.join(batch_dir, 'dataset_01_*.pkl'))
+        
+        # Extraer índices y encontrar el máximo
         if not files:
-            return 0
+            return 0    # Si no hay archivos, empezar desde 0
         nums = []
+
+        # Extraer números de los nombres de archivo
         for p in files:
             m = re.search(r'_(\d+)\.pkl$', os.path.basename(p))
             if m:
@@ -174,7 +237,15 @@ class ChordonomiconPreprocessorResumable:
 
     # ------------------------ Main processing ------------------------
     def process(self) -> Dict[str, Any]:
+        """
+        Procesa el dataset en batches, con capacidad de reanudación.
+        returns:
+            Un diccionario con el contenido del último batch procesado (parcial).
+        """
+        
         print('Cargando y limpiando datos...')
+        
+        # Cargar CSV de Chordonomicon
         if self.num_progressions is None:
             df = pd.read_csv(self.csv_path)
         else:
@@ -182,75 +253,89 @@ class ChordonomiconPreprocessorResumable:
 
         print(f'Total de progresiones cargadas: {df.shape[0]}')
 
-        # Per-batch buffers
+        # Buffers para batch
         batch_chords: List[List[str]] = []
         batch_rolls: List[np.ndarray] = []
         batch_meta: List[Dict[str, Any]] = []
         batch_count = 0
 
-        # Continue numbering from last existing batch on disk
+        # Índice de batch actual (para nombrar archivos)
         current_batch_idx = self._next_existing_batch_index()
 
-        # Resume flags
-        resuming = self.resume_from_original_id is not None
+        # Flags de reanudación
+        resuming = self.resume_from_original_id is not None # Si se debe reanudar
         reached_resume_row = False
-        resume_skip_windows = int(self.resume_windows_done) if resuming else 0
+        resume_skip_windows = int(self.resume_windows_done) if resuming else 0  # Ventanas a saltar en la progresión de reanudación
 
         print('Procesando progresiones...')
         for _, row in tqdm(df.iterrows(), total=df.shape[0]):
-            # If resuming, skip rows until we hit the target original_id (stored under 'id' in CSV)
+            # Si se está reanudando, saltar filas hasta alcanzar el original_id objetivo (almacenado en 'id' en CSV)
             if resuming and not reached_resume_row:
                 if row.get('id') != self.resume_from_original_id:
                     continue
                 reached_resume_row = True
 
-            # Clean chord text and parse
+            # Limpiar y parsear acordes
             chord_tokens = self._clean_chord_string(row['chords'])
             song_chords = [self._parse_single_chord(cs) for cs in chord_tokens]
+            
+            # Filtrar acordes no parseados (None)
             song_chords = [c for c in song_chords if c is not None]
 
-            if len(song_chords) < self.sequence_length:
+            # Si la progresión es demasiado corta, saltarla
+            if len(song_chords) < self.sequence_length:               
+                # Si se está reanudando y se alcanzó la fila objetivo, desactivar reanudación y continuar normalmente
                 if resuming and reached_resume_row:
-                    resuming = False  # resume done even if sequence is too short
+                    resuming = False
                 continue
-
+            
+            # Calcular número de ventanas posibles
             windows_amount = len(song_chords) - self.sequence_length + 1
 
-            # Build starts limited by max_windows_per_progression
+            # Construir inicios limitados por max_windows_per_progression
             if windows_amount <= self.max_windows_per_progression:
                 starts = list(range(0, windows_amount))
             else:
+                # Si hay más ventanas que el máximo, calculamos un stride en base al máximo permitido                
                 stride_dyn = math.ceil(windows_amount / self.max_windows_per_progression)
                 starts = list(range(0, windows_amount, stride_dyn))
+                
+                # Nos aseguramos de no exceder el máximo
                 if len(starts) > self.max_windows_per_progression:
                     starts = starts[: self.max_windows_per_progression]
                 last_start = windows_amount - 1
+                
+                # Aseguramos incluir la última ventana
                 if starts and starts[-1] != last_start:
                     if len(starts) == self.max_windows_per_progression:
                         starts[-1] = last_start
                     else:
                         starts.append(last_start)
 
-            # If resuming on this row, drop first N windows already saved
+            # Si reanudando en esta fila, saltar ventanas ya guardadas
             if resuming and reached_resume_row:
                 if resume_skip_windows > 0:
                     starts = starts[resume_skip_windows:]
-                resuming = False  # from now on, continue normally
+                resuming = False  # Continuar normalmente después de esta fila
 
             if not starts:
                 continue
 
-            # Compute key once (optional heuristic: first window)
+            # Calcular tonalidad una vez (heurística opcional: primera ventana)
             tonic, mode, coeff = self._analyze_key(song_chords[: self.sequence_length])
 
-            for i in starts:
-                seq = song_chords[i : i + self.sequence_length]
-                pr_seq = [self._to_piano_roll(c) for c in seq]
-
-                batch_chords.append([c.figure for c in seq])
+            # Procesar cada ventana
+            for i in starts:                
+                seq = song_chords[i : i + self.sequence_length] # Secuencia de acordes actual
+                pr_seq = [self._to_piano_roll(c) for c in seq]  # Secuencia de piano rolls
+                chord_symbol_sequence = [c.figure for c in seq] # Secuencia de símbolos de acordes
+                
+                # Añadir al batch
+                batch_chords.append(chord_symbol_sequence)
                 batch_rolls.append(np.array(pr_seq))
 
-                genres = re.findall(r"'(.*?)'", row['genres']) if isinstance(row['genres'], str) else []
+                # Metadata
+                genres = re.findall(r"'(.*?)'", row['genres']) if isinstance(row['genres'], str) else [] # Extraer lista de géneros
                 batch_meta.append(
                     {
                         'original_id': row['id'],
@@ -266,11 +351,12 @@ class ChordonomiconPreprocessorResumable:
                         'decade': row.get('decade'),
                     }
                 )
-
-                batch_count += 1
                 
+                batch_count += 1 # Incrementar contador de batch
+                
+                # Si el batch está lleno, guardarlo
                 if batch_count == self.batch_size:
-                    current_batch_idx += 1
+                    current_batch_idx += 1 # Incrementar índice de batch
                     out = {
                         'piano_rolls': np.array(batch_rolls),
                         'chord_symbols': batch_chords,
@@ -280,11 +366,11 @@ class ChordonomiconPreprocessorResumable:
                     os.makedirs(os.path.dirname(out_path), exist_ok=True)
                     pd.to_pickle(out, out_path)
 
-                    # reset buffers
+                    # Resetear buffers
                     batch_chords, batch_rolls, batch_meta = [], [], []
                     batch_count = 0
 
-        # Flush any remaining partial batch
+        # Guardar cualquier batch parcial restante
         if batch_count > 0:
             current_batch_idx += 1
             out = {
@@ -297,7 +383,7 @@ class ChordonomiconPreprocessorResumable:
             pd.to_pickle(out, out_path)
 
         print(f'Procesamiento completado. Batches escritos hasta índice {current_batch_idx}.')
-        # Return last batch content for quick inspection
+        # Retornar contenido del último batch para inspección rápida
         return {
             'piano_rolls': np.array(batch_rolls),
             'chord_symbols': batch_chords,

@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import os
 from tqdm import tqdm
+from sklearn.model_selection import train_test_split
 
 # --- FUNCIÓN DE AUMENTO DE DATOS ---
 # Esta función se usará "al vuelo" durante el entrenamiento, no aquí.
@@ -82,6 +83,7 @@ class FinalDatasetProcessor:
             
             print(f"Datos cargados: {len(self.df_chordonomicon)} secuencias de Chordonomicon, "
                   f"{len(self.df_popular_hook)} secuencias de Popular Hook.")
+            
         except FileNotFoundError as e:
             print(f"Error: No se pudo encontrar un archivo .pkl. Asegúrate de que las rutas son correctas.")
             raise e
@@ -104,7 +106,7 @@ class FinalDatasetProcessor:
               f"Tamaño final: {final_rows} secuencias.")
         return df
 
-    def create_final_datasets(self):
+    def create_final_datasets(self, key_correlation_threshold=0.7, test_size=0.1, dev_size=0.1):
         """
         Ejecuta el pipeline completo de carga, limpieza, división y guardado.
         """
@@ -114,42 +116,67 @@ class FinalDatasetProcessor:
         df_chordonomicon_clean = self.clean_data(self.df_chordonomicon, "Chordonomicon")
         df_popular_hook_clean = self.clean_data(self.df_popular_hook, "Popular Hook")
 
-        # 2. Dividir Popular Hook
-        print("Dividiendo Popular Hook en 'Video Game' y 'Otros géneros'...")
+        # 2. Filtrar Chordonomicon por confianza de tonalidad
+        print(f"Filtrando Chordonomicon por confianza de tonalidad > {key_correlation_threshold}...")
+        initial_rows = len(df_chordonomicon_clean)
+        df_chordonomicon_filtered = df_chordonomicon_clean[df_chordonomicon_clean['key_correlation'] > key_correlation_threshold]
+        print(f"Se eliminaron {initial_rows - len(df_chordonomicon_filtered)} secuencias con tonalidad ambigua.")
+        
+        # 3. Unificar Esquema de Metadatos
+        print("Unificando esquemas de metadatos...")
+        # Renombrar columnas de Chordonomicon para que coincidan
+        df_chordonomicon_filtered['tonality'] = df_chordonomicon_filtered['key_tonic'] + ' ' + df_chordonomicon_filtered['key_mode']
+        df_chordonomicon_filtered.rename(columns={'artist_id': 'artist', 'song_id': 'song'}, inplace=True)
+
+        # Definir columnas comunes
+        COMMON_COLS = ['artist', 'song', 'tonality', 'genres', 'piano_roll', 'chord_symbols']
+        
+        # Seleccionar columnas
+        df_chordonomicon_final = df_chordonomicon_filtered[COMMON_COLS]
+        
+        # 4. Dividir Popular Hook
+        print("Dividiendo Popular Hook...")
         is_videogame = df_popular_hook_clean['genres'].str.contains('Video Game', na=False, case=False)
         df_ph_videogame = df_popular_hook_clean[is_videogame]
         df_ph_other = df_popular_hook_clean[~is_videogame]
         
-        # --- 3. Ensamblar los Datasets Finales ---
-        # Dataset para el entrenamiento principal del VAE
-        dataset_vae_main = pd.concat([df_chordonomicon_clean, df_ph_other], ignore_index=True)
+        # 5. Ensamblar los Datasets
+        # Dataset principal: Chordonomicon (filtrado) + Popular Hook (no videojuegos)
+        dataset_vae_main = pd.concat([df_chordonomicon_final, df_ph_other[COMMON_COLS]], ignore_index=True)
         
-        # Dataset para el fine-tuning final (solo la música por ahora)
-        dataset_finetune_music = df_ph_videogame
+        # Dataset de fine-tuning: Solo videojuegos, conservando la emoción
+        FINETUNE_COLS = COMMON_COLS + ['midi_emotion_predected']
+        dataset_finetune_music = df_ph_videogame[FINETUNE_COLS]
         
-        # --- 4. Guardar los Datasets ---
-        path_vae_main = os.path.join(self.output_dir, 'dataset_vae_main.pkl')
-        path_finetune = os.path.join(self.output_dir, 'dataset_finetune_music.pkl')
+        # 6. Dividir en Train/Dev/Test
+        print("Dividiendo el dataset principal en train/dev/test...")
+        train_val_df, test_df = train_test_split(dataset_vae_main, test_size=test_size, random_state=42)
         
+        # Ajustar el dev_size para que sea sobre el total original
+        dev_size_adjusted = dev_size / (1 - test_size)
+        train_df, dev_df = train_test_split(train_val_df, test_size=dev_size_adjusted, random_state=42)
+
+        # --- 7. Guardar los Datasets ---
         print("\n--- Resumen de Datasets Finales ---")
-        print(f"Dataset VAE Main (Chordonomicon + Otros): {len(dataset_vae_main)} secuencias")
-        print(f"Dataset Fine-Tuning (Video Game): {len(dataset_finetune_music)} secuencias")
+        print(f"Set de Entrenamiento (Train): {len(train_df)} secuencias")
+        print(f"Set de Desarrollo (Dev/Validation): {len(dev_df)} secuencias")
+        print(f"Set de Prueba (Test): {len(test_df)} secuencias")
+        print(f"Dataset de Fine-Tuning (Video Game Music): {len(dataset_finetune_music)} secuencias")
         
-        print(f"\nGuardando 'dataset_vae_main.pkl'...")
-        dataset_vae_main.to_pickle(path_vae_main)
+        train_df.to_pickle(os.path.join(self.output_dir, 'train_set.pkl'))
+        dev_df.to_pickle(os.path.join(self.output_dir, 'dev_set.pkl'))
+        test_df.to_pickle(os.path.join(self.output_dir, 'test_set.pkl'))
+        dataset_finetune_music.to_pickle(os.path.join(self.output_dir, 'dataset_finetune_music.pkl'))
         
-        print(f"Guardando 'dataset_finetune_music.pkl'...")
-        dataset_finetune_music.to_pickle(path_finetune)
-        
-        print("\n¡Proceso completado! Tus datasets están limpios, organizados y listos.")
+        print(f"\n¡Proceso completado! Archivos guardados en '{self.output_dir}'.")
 
 if __name__ == '__main__':
     # --- Configuración ---
     # Directorio donde se encuentran los archivos .pkl de entrada
-    CHORDONOMICON_PATH = '/mnt/c/Users/nehem/OneDrive - Universidad de Chile/Universidad/6to año/Data/MIDI/preprocced/Chordomicon/dataset_01.pkl'
-    POPULARHOOK_PATH = '/mnt/c/Users/nehem/OneDrive - Universidad de Chile/Universidad/6to año/Data/MIDI/preprocced/Popular-hook/dataset_01.pkl'
+    CHORDONOMICON_PATH = '/home/neme/workspace/Data/MIDI/preprocced/Chordomicon/batch/dataset_01_1.pkl'
+    POPULARHOOK_PATH = '/home/neme/workspace/Data/MIDI/preprocced/Popular-hook/dataset_01_1.pkl'
     # Directorio donde se guardarán los datasets finales
-    PROCESSED_DATA_DIR = '/mnt/c/Users/nehem/OneDrive - Universidad de Chile/Universidad/6to año/Data/MIDI/preprocced/'
+    PROCESSED_DATA_DIR = '/home/neme/workspace/Data/MIDI/processed_final/'
         
     # --- Ejecución ---
     processor = FinalDatasetProcessor(

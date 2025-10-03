@@ -80,17 +80,17 @@ class PopularHookPreprocessorResumable:
                     chord_part = part
                     break
             if chord_part is None:
-                return None
+                return [None]
             
             # Extraemos los acordes
             chordified_part = chord_part.chordify()
             
             # Obtenemos todos los objetos Chord
             chords = [element for element in chordified_part.recurse().getElementsByClass('Chord')]
-            return chords if chords else None
+            return chords if chords else [None]
         except Exception as e:
             print(f"No se pudo procesar el archivo MIDI {os.path.basename(midi_path)}: {e}")
-            return None
+            return [None]
 
     def _chords_to_piano_roll(self, chord_sequence: list) -> np.ndarray:
         """
@@ -240,8 +240,17 @@ class PopularHookPreprocessorResumable:
                 
                 # Convertimos a piano roll y extraemos símbolos
                 piano_roll_sequence = self._chords_to_piano_roll(sequence)
-                chord_symbol_sequence = [c.pitchedCommonName for c in sequence]
                 
+                chord_symbol_sequence = []
+                for c in sequence:
+                    try:
+                        symbol = music21.harmony.chordSymbolFromChord(c).figure                          
+                        if symbol == 'Chord Symbol Cannot Be Identified':
+                            symbol = c.pitchNames  # No Chord                        
+                    except Exception as e:
+                        symbol = c.pitchNames  # No Chord
+                
+                    chord_symbol_sequence.append(symbol)
                 # Añadimos al batch 
                 batch_chords.append(chord_symbol_sequence)  # Symbols de acordes
                 batch_rolls.append(np.array(piano_roll_sequence)) # Piano roll 
@@ -289,6 +298,7 @@ class PopularHookPreprocessorResumable:
             out_path = os.path.join(batch_dir, f'dataset_01_{current_batch_idx}.pkl')
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
             pd.to_pickle(out, out_path)
+            
         print(f'Procesamiento completo. Batches escritos hasta índice {current_batch_idx}.')
         return {
             'piano_rolls': np.array(batch_rolls),
@@ -297,15 +307,26 @@ class PopularHookPreprocessorResumable:
         }
 
 if __name__ == '__main__':
-    DATASET_ROOT_PATH = '/mnt/c/Users/nehem/Desktop/Tesis/Data/MIDI/popular-hook'
+    # --- Configuración ---
+    
+    # Directorio raíz donde descomprimiste el dataset Popular Hook
+    DATASET_ROOT_PATH = '/home/neme/workspace/Data/MIDI/preprocced/Popular-hook'
+    
+    # nombre del archivo de metadatos principal y su ruta
     INFO_TABLES_FILENAME = 'info_tables.xlsx'
     INFO_TABLES_FILE_PATH = os.path.join(DATASET_ROOT_PATH, INFO_TABLES_FILENAME)
-    OUTPUT_PATH = '/mnt/c/Users/nehem/OneDrive - Universidad de Chile/Universidad/6to año/Data/MIDI/preprocced/Popular-hook/dataset_01.pkl'
+    
+    # Ruta de salida para los batches procesados
+    OUTPUT_PATH = '/home/neme/workspace/Data/MIDI/preprocced/Popular-hook/'
+    
+    # --- Parámetros de procesamiento ---
     BATCH_SIZE = 5000
     MAX_WINDOWS_PER_PROGRESSION = 10
-    # Reanudar desde idx y ventanas ya guardadas (ajusta según tu checkpoint)
+    
+    # --- Reanudación ---
     RESUME_FROM_IDX = None  # Ejemplo: 12345
     RESUME_WINDOWS_DONE = 0
+    
     preprocessor = PopularHookPreprocessorResumable(
         dataset_path=DATASET_ROOT_PATH,
         info_tables_file=INFO_TABLES_FILE_PATH,
@@ -319,6 +340,8 @@ if __name__ == '__main__':
         save_path=OUTPUT_PATH,
         genre_filter=None
     )
+    
+    # Verificamos el último batch parcial
     print('\n--- Último batch (parcial) ---')
     print(f"piano_rolls: {result['piano_rolls'].shape}")
     if len(result['chord_symbols']) > 0:
