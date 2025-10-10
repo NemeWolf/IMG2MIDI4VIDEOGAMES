@@ -75,8 +75,7 @@ class MusicVAEModel(keras.Model):
         
     def call(self, inputs, training=None):
         """Forward pass del modelo."""
-        x, y = inputs
-        vae_input, initial_state_h, initial_state_c = x
+        vae_input, initial_state_h, initial_state_c = inputs
         z_mean, z_log_var, z = self.encoder(vae_input, training=training)
         reconstruction, _, _ = self.decoder([z, vae_input, initial_state_h, initial_state_c], training=training)
         return reconstruction 
@@ -298,4 +297,5 @@ if __name__ == '__main__':
     music_model.decoder.summary()
 
     print("\n--- Resumen del VAE Completo ---")
+
     music_model.vae.summary()
