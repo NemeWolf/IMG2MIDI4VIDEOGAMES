@@ -6,13 +6,15 @@ import re
 import glob
 import math
 from tqdm import tqdm
+import json
 
 class PopularHookPreprocessorResumable:
     """
     Procesador para Popular Hook con batching, reanudación y enventanado dinámico.
     """
-    def __init__(self, dataset_path # Ruta al directorio del dataset
-                 , info_tables_file, # Ruta al archivo info_tables.xlsx
+    def __init__(self, dataset_path, # Ruta al directorio del dataset
+                 info_tables_file, # Ruta al archivo info_tables.xlsx
+                 num_progresions, # Número de progresiones a procesar
                  sequence_length=16, # Longitud de la secuencia de acordes
                  batch_size=5000, # Tamaño del batch para guardar
                  max_windows_per_progression=10, # Máximo de ventanas por progresión
@@ -22,6 +24,7 @@ class PopularHookPreprocessorResumable:
         
         self.dataset_path = dataset_path
         self.info_tables_path = info_tables_file
+        self.num_progresions = num_progresions
         self.sequence_length = sequence_length
         self.batch_size = batch_size
         self.max_windows_per_progression = max_windows_per_progression
@@ -41,7 +44,12 @@ class PopularHookPreprocessorResumable:
 
         # Cargar metadatos
         print("Cargando archivo info_tables...")
-        self.metadata_df = pd.read_excel(self.info_tables_path, engine='openpyxl')
+        
+        if self.num_progresions is None:
+            self.metadata_df = pd.read_excel(self.info_tables_path, engine='openpyxl')
+        else:
+            self.metadata_df = pd.read_excel(self.info_tables_path, engine='openpyxl', nrows=self.num_progresions)
+
         print(f"Metadatos cargados. Se encontraron {len(self.metadata_df)} entradas.")
 
     def _extract_emotion_from_csv(self, emotion_csv_path: str) -> dict:
@@ -61,8 +69,69 @@ class PopularHookPreprocessorResumable:
         except Exception as e:
             print(f"Error leyendo emoción {emotion_csv_path}: {e}")
             return {}
-
-    def _extract_chords_from_midi(self, midi_path: str) -> list:
+    def _parse_tonality_to_key(self, tonality_str: str):
+        """
+        Convierte string de tonalidad del dataset Popular Hook a objeto Key de music21.
+        args:
+            tonality_str (str): String de tonalidad (ej: 'A minor', 'C Major', 'D dorian')
+        returns:
+            music21.key.Key: Objeto Key o None si no se puede parsear
+        """
+        if not tonality_str or tonality_str.lower() in ['unknown', 'n/a', '']:
+            return None
+        
+        try:
+            # Normalizar el string y convertir a minúsculas para el modo
+            tonality_clean = tonality_str.strip()
+            
+            # Separar tono y modo
+            parts = tonality_clean.split()
+            if len(parts) != 2:
+                print(f"Formato de tonalidad no reconocido: '{tonality_str}'")
+                return None
+                
+            tone, mode = parts[0], parts[1].lower()  # Convertir modo a minúsculas
+            
+            # Mapeo de modos del dataset a music21
+            mode_mapping = {
+                'major': 'major',
+                'minor': 'minor',
+                'dorian': 'dorian',
+                'phrygian': 'phrygian',
+                'lydian': 'lydian',
+                'mixolydian': 'mixolydian',
+                'locrian': 'locrian',
+                'harmonicminor': 'minor',
+                'phrygiandominant': 'phrygian'
+            }
+            
+            # Verificar si el modo existe en el mapeo
+            if mode not in mode_mapping:
+                print(f"Modo no reconocido: '{mode}' en tonalidad '{tonality_str}'")
+                return None
+            
+            # Mapeo de tonos del dataset
+            tone_mapping = {
+                'D#': 'D#', 'F': 'F', 'F#': 'F#', 'Db': 'D-',
+                'A#': 'A#', 'G': 'G', 'E': 'E', 'D': 'D',
+                'Eb': 'E-', 'A': 'A', 'Bb': 'B-', 'C': 'C',
+                'B': 'B', 'G#': 'G#', 'C#': 'C#', 'Gb': 'G-',
+                'E#': 'E#', 'Ab': 'A-'
+            }
+            
+            # Convertir tono y modo
+            music21_tone = tone_mapping.get(tone, tone)
+            music21_mode = mode_mapping[mode]  # Ya verificamos que existe
+                        
+            # Crear el objeto Key
+            return music21.key.Key(music21_tone, music21_mode)
+                    
+        except Exception as e:
+            print(f"Error parseando tonalidad '{tonality_str}' --> : {e}")
+            return None    
+    
+    
+    def _extract_chords_from_midi(self, midi_path: str, tonality: str) -> list:
         """
         Extrae la secuencia de acordes de un archivo MIDI usando music21.
         args:
@@ -72,9 +141,20 @@ class PopularHookPreprocessorResumable:
         """
         try:
             score = music21.converter.parse(midi_path)
-            chord_part = None
-                    
+            
+            # Configurar tonalidad
+            key_obj = None
+            if tonality:
+                try:
+                    key_obj = self._parse_tonality_to_key(tonality)
+                    if key_obj:
+                        score.insert(0, key_obj)         
+                                       
+                except Exception as e:
+                    print(f"No se pudo configurar la tonalidad '{tonality}': {e}")
+            
             # Los archivos .mid contienen una parte llamada "Chord" que tiene los acordes
+            chord_part = None # Parte que contiene los acordes                                
             for part in score.parts:
                 if 'Chord' in str(part.partName).title():
                     chord_part = part
@@ -82,12 +162,17 @@ class PopularHookPreprocessorResumable:
             if chord_part is None:
                 return [None]
             
+            # Aplicar tonalidad a la parte también
+            if key_obj:
+                chord_part.insert(0, key_obj)   
+            
             # Extraemos los acordes
             chordified_part = chord_part.chordify()
             
             # Obtenemos todos los objetos Chord
             chords = [element for element in chordified_part.recurse().getElementsByClass('Chord')]
             return chords if chords else [None]
+        
         except Exception as e:
             print(f"No se pudo procesar el archivo MIDI {os.path.basename(midi_path)}: {e}")
             return [None]
@@ -137,7 +222,10 @@ class PopularHookPreprocessorResumable:
             genre_filter (str, optional): Género musical para filtrar. Si es None, se procesan todos los géneros.
         returns:
             dict: Diccionario con los datos procesados del último batch (parcial).
-        """
+        """        
+        # CARGAR DATOS
+        
+        # Captura del DataFrame objetivo
         target_df = self.metadata_df
         
         # Filtrado por género si se especifica
@@ -147,9 +235,7 @@ class PopularHookPreprocessorResumable:
             print(f"Se encontraron {len(target_df)} entradas para el género '{genre_filter}'.")
 
         # Inicialización de listas para el batch
-        batch_chords = []
-        batch_rolls = []
-        batch_meta = []
+        batch = []
         batch_count = 0
         
         # Configuración para reanudación
@@ -161,6 +247,8 @@ class PopularHookPreprocessorResumable:
         reached_resume_row = False
         resume_skip_windows = int(self.resume_windows_done) if resuming else 0
 
+        # PROCESAMIENTO PRINCIPAL ============================
+        
         print("Procesando archivos MIDI y de emoción por lotes...")
         
         # Iteramos por cada fila del DataFrame
@@ -177,7 +265,10 @@ class PopularHookPreprocessorResumable:
             if not path_from_info:
                 continue
             
-            # Construimos rutas completas
+            # capturamos tonalidad dada por metadatos
+            tonality_str = str(row.get('tonality'))  # Obtener tonalidad de metadatos
+            
+            # Construimos rutas completas a archivos
             section_folder_path = path_from_info.replace('.mid', '')
             full_section_path = os.path.join(self.dataset_path, section_folder_path)
             section_name = os.path.basename(full_section_path)
@@ -190,7 +281,7 @@ class PopularHookPreprocessorResumable:
                 continue
             
             # Extraemos acordes y emoción
-            m21_chords = self._extract_chords_from_midi(midi_file_path)
+            m21_chords = self._extract_chords_from_midi(midi_file_path, tonality_str)
             emotion_data = self._extract_emotion_from_csv(emotion_csv_path)
             
             # Si no hay acordes o son insuficientes, saltar
@@ -198,6 +289,8 @@ class PopularHookPreprocessorResumable:
                 if resuming and reached_resume_row:
                     resuming = False
                 continue
+            
+            # ENVENTANADO ====================================
             
             # Cantidad de ventanas posibles
             windows_amount = len(m21_chords) - self.sequence_length + 1
@@ -233,7 +326,8 @@ class PopularHookPreprocessorResumable:
             if not starts:
                 continue            
             
-            # Procesamos cada ventana 
+            # PROCESAMIENTO DE VENTANAS ============================
+            
             for i in starts:
                 
                 sequence = m21_chords[i:i + self.sequence_length] # Secuencia de acordes actual
@@ -241,29 +335,37 @@ class PopularHookPreprocessorResumable:
                 # Convertimos a piano roll y extraemos símbolos
                 piano_roll_sequence = self._chords_to_piano_roll(sequence)
                 
+                # Aplanamos piano roll a 1D
+                piano_roll_flat = piano_roll_sequence.flatten().tolist()
+                
+                # Extraemos símbolos de acordes
                 chord_symbol_sequence = []
                 for c in sequence:
                     try:
                         symbol = music21.harmony.chordSymbolFromChord(c).figure                          
-                        if symbol == 'Chord Symbol Cannot Be Identified':
+                        if symbol == 'Chord Symbol Cannot Be Identified' or not symbol:
                             symbol = c.pitchNames  # No Chord                        
                     except Exception as e:
                         symbol = c.pitchNames  # No Chord
                 
                     chord_symbol_sequence.append(symbol)
-                # Añadimos al batch 
-                batch_chords.append(chord_symbol_sequence)  # Symbols de acordes
-                batch_rolls.append(np.array(piano_roll_sequence)) # Piano roll 
+
+                # Convertir chord_symbols a JSON string
+                chord_symbol_json = json.dumps(chord_symbol_sequence)
                 
-                # Metadatos
-                batch_meta.append({
+                # Añadimos al batch actual
+                batch.append({
+                    'piano_rolls': piano_roll_flat,
+                    'chord_symbols': chord_symbol_json,
+                    'sequence_length': self.sequence_length,
+                    'piano_roll_size': self.piano_size,
                     'idx': row.get('idx'),
-                    'artist': row.get('singer', 'Unknown'),
-                    'song': row.get('song', 'Unknown'),
-                    'section': row.get('section', 'Unknown'),
-                    'tonality': row.get('tonality', 'Unknown'),
-                    'genres': row.get('genres', 'Unknown'),
-                    'path': full_section_path,
+                    'artist': str(row.get('singer', 'Unknown')),
+                    'song': str(row.get('song', 'Unknown')),
+                    'section': str(row.get('section', 'Unknown')),
+                    'tonality': str(row.get('tonality', 'Unknown')),
+                    'genres': str(row.get('genres', 'Unknown')),
+                    'path': str(full_section_path),
                     **emotion_data
                 })
                                  
@@ -274,37 +376,35 @@ class PopularHookPreprocessorResumable:
                     current_batch_idx += 1  # Incrementamos índice de batch
                     
                     # Guardamos el batch actual
-                    out = {
-                        'piano_rolls': np.array(batch_rolls),
-                        'chord_symbols': batch_chords,
-                        'metadata': pd.DataFrame(batch_meta)
-                    }
-                    out_path = os.path.join(batch_dir, f'dataset_01_{current_batch_idx}.pkl')
+                    df_rows = pd.DataFrame(batch)                    
+                    
+                    out_path = os.path.join(batch_dir, f'dataset_01_{current_batch_idx}.parquet')
                     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-                    pd.to_pickle(out, out_path)
+                    
+                    df_rows.to_parquet(out_path, compression='snappy')
+                    
+                    # Limpieza
+                    del df_rows
+                    del batch[:]
                     
                     # Reseteamos listas y contador
-                    batch_chords, batch_rolls, batch_meta = [], [], []
+                    batch = []
                     batch_count = 0
                     
         # Guardar batch parcial restante
         if batch_count > 0:
             current_batch_idx += 1
-            out = {
-                'piano_rolls': np.array(batch_rolls),
-                'chord_symbols': batch_chords,
-                'metadata': pd.DataFrame(batch_meta)
-            }
-            out_path = os.path.join(batch_dir, f'dataset_01_{current_batch_idx}.pkl')
-            os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            pd.to_pickle(out, out_path)
             
+            df_rows = pd.DataFrame(batch)
+            
+            out_path = os.path.join(batch_dir, f'dataset_01_{current_batch_idx}.parquet')
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            df_rows.to_parquet(out_path, compression='snappy')
+
         print(f'Procesamiento completo. Batches escritos hasta índice {current_batch_idx}.')
         return {
-            'piano_rolls': np.array(batch_rolls),
-            'chord_symbols': batch_chords,
-            'metadata': pd.DataFrame(batch_meta)
-        }
+
+    }
 
 if __name__ == '__main__':
     # --- Configuración ---
@@ -320,6 +420,7 @@ if __name__ == '__main__':
     OUTPUT_PATH = '/home/neme/workspace/Data/MIDI/preprocced/Popular-hook/'
     
     # --- Parámetros de procesamiento ---
+    NUM_PROGRESION = None
     BATCH_SIZE = 5000
     MAX_WINDOWS_PER_PROGRESSION = 10
     
@@ -330,6 +431,7 @@ if __name__ == '__main__':
     preprocessor = PopularHookPreprocessorResumable(
         dataset_path=DATASET_ROOT_PATH,
         info_tables_file=INFO_TABLES_FILE_PATH,
+        num_progresions=NUM_PROGRESION,
         sequence_length=16,
         batch_size=BATCH_SIZE,
         max_windows_per_progression=MAX_WINDOWS_PER_PROGRESSION,
@@ -340,10 +442,3 @@ if __name__ == '__main__':
         save_path=OUTPUT_PATH,
         genre_filter=None
     )
-    
-    # Verificamos el último batch parcial
-    print('\n--- Último batch (parcial) ---')
-    print(f"piano_rolls: {result['piano_rolls'].shape}")
-    if len(result['chord_symbols']) > 0:
-        print(result['chord_symbols'][0])
-        print(result['metadata'].head(1))

@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from typing import List, Tuple, Optional, Dict, Any
+import json 
 
 from music21 import stream, chord, key as m21key, pitch, harmony, analysis as m21analysis
 
@@ -221,7 +222,7 @@ class ChordonomiconPreprocessorResumable:
         # Buscar archivos batch existentes
         batch_dir = os.path.join(self.save_path, 'batch')
         os.makedirs(batch_dir, exist_ok=True)
-        files = glob.glob(os.path.join(batch_dir, 'dataset_01_*.pkl'))
+        files = glob.glob(os.path.join(batch_dir, 'dataset_01_*.parquet'))
         
         # Extraer índices y encontrar el máximo
         if not files:
@@ -230,7 +231,7 @@ class ChordonomiconPreprocessorResumable:
 
         # Extraer números de los nombres de archivo
         for p in files:
-            m = re.search(r'_(\d+)\.pkl$', os.path.basename(p))
+            m = re.search(r'_(\d+)\.parquet$', os.path.basename(p))
             if m:
                 nums.append(int(m.group(1)))
         return max(nums) if nums else 0
@@ -245,7 +246,7 @@ class ChordonomiconPreprocessorResumable:
         
         print('Cargando y limpiando datos...')
         
-        # Cargar CSV de Chordonomicon
+        # CARGAR DATOS ============================
         if self.num_progressions is None:
             df = pd.read_csv(self.csv_path)
         else:
@@ -253,20 +254,21 @@ class ChordonomiconPreprocessorResumable:
 
         print(f'Total de progresiones cargadas: {df.shape[0]}')
 
-        # Buffers para batch
-        batch_chords: List[List[str]] = []
-        batch_rolls: List[np.ndarray] = []
-        batch_meta: List[Dict[str, Any]] = []
+        # Buffer para batch
+        batch = []       
+        
         batch_count = 0
 
         # Índice de batch actual (para nombrar archivos)
         current_batch_idx = self._next_existing_batch_index()
-
+        
         # Flags de reanudación
         resuming = self.resume_from_original_id is not None # Si se debe reanudar
         reached_resume_row = False
         resume_skip_windows = int(self.resume_windows_done) if resuming else 0  # Ventanas a saltar en la progresión de reanudación
 
+        # PROCESAMIENTO PRINCIPAL ============================
+        
         print('Procesando progresiones...')
         for _, row in tqdm(df.iterrows(), total=df.shape[0]):
             # Si se está reanudando, saltar filas hasta alcanzar el original_id objetivo (almacenado en 'id' en CSV)
@@ -288,6 +290,8 @@ class ChordonomiconPreprocessorResumable:
                 if resuming and reached_resume_row:
                     resuming = False
                 continue
+            
+            # ENVENTANADO DE LA PROGRESIÓN ============================
             
             # Calcular número de ventanas posibles
             windows_amount = len(song_chords) - self.sequence_length + 1
@@ -324,20 +328,28 @@ class ChordonomiconPreprocessorResumable:
             # Calcular tonalidad una vez (heurística opcional: primera ventana)
             tonic, mode, coeff = self._analyze_key(song_chords[: self.sequence_length])
 
-            # Procesar cada ventana
+            # PROCESAMIENTO DE VENTANAS ============================
             for i in starts:                
                 seq = song_chords[i : i + self.sequence_length] # Secuencia de acordes actual
                 pr_seq = [self._to_piano_roll(c) for c in seq]  # Secuencia de piano rolls
                 chord_symbol_sequence = [c.figure for c in seq] # Secuencia de símbolos de acordes
+
+                # Aplanar piano rolls 
+                pr_seq_flat = np.array(pr_seq).flatten().tolist()
                 
-                # Añadir al batch
-                batch_chords.append(chord_symbol_sequence)
-                batch_rolls.append(np.array(pr_seq))
+                # Convertir chord_symbols a JSON string
+                chord_symbol_json = json.dumps(chord_symbol_sequence)
 
                 # Metadata
                 genres = re.findall(r"'(.*?)'", row['genres']) if isinstance(row['genres'], str) else [] # Extraer lista de géneros
-                batch_meta.append(
+    
+                # Añadir al batch
+                batch.append(
                     {
+                        'chord_symbols': chord_symbol_json,
+                        'piano_rolls': pr_seq_flat,
+                        'sequence_length': self.sequence_length,
+                        'piano_roll_size': self.piano_roll_size,
                         'original_id': row['id'],
                         'artist_id': row.get('artist_id'),
                         'song_id': row.get('spotify_song_id'),
@@ -357,46 +369,42 @@ class ChordonomiconPreprocessorResumable:
                 # Si el batch está lleno, guardarlo
                 if batch_count == self.batch_size:
                     current_batch_idx += 1 # Incrementar índice de batch
-                    out = {
-                        'piano_rolls': np.array(batch_rolls),
-                        'chord_symbols': batch_chords,
-                        'metadata': pd.DataFrame(batch_meta),
-                    }
-                    out_path = os.path.join(self.save_path, 'batch', f'dataset_01_{current_batch_idx}.pkl')
+                    
+                    df_rows = pd.DataFrame(batch)                   
+                   
+                    out_path = os.path.join(self.save_path, 'batch', f'dataset_01_{current_batch_idx}.parquet')
                     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-                    pd.to_pickle(out, out_path)
-
+                    
+                    df_rows.to_parquet(out_path, compression='snappy')
+                    
+                    # Limpieza
+                    del df_rows
+                    del batch[:]
+                    
                     # Resetear buffers
-                    batch_chords, batch_rolls, batch_meta = [], [], []
+                    batch = []
                     batch_count = 0
 
         # Guardar cualquier batch parcial restante
         if batch_count > 0:
             current_batch_idx += 1
-            out = {
-                'piano_rolls': np.array(batch_rolls),
-                'chord_symbols': batch_chords,
-                'metadata': pd.DataFrame(batch_meta),
-            }
-            out_path = os.path.join(self.save_path, 'batch', f'dataset_01_{current_batch_idx}.pkl')
+            df_row = pd.DataFrame(batch)
+            
+            out_path = os.path.join(self.save_path, 'batch', f'dataset_01_{current_batch_idx}.parquet')
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            pd.to_pickle(out, out_path)
+
+            df_row.to_parquet(out_path, compression='snappy')
 
         print(f'Procesamiento completado. Batches escritos hasta índice {current_batch_idx}.')
         # Retornar contenido del último batch para inspección rápida
-        return {
-            'piano_rolls': np.array(batch_rolls),
-            'chord_symbols': batch_chords,
-            'metadata': pd.DataFrame(batch_meta),
-        }
-
+        return {}
 
 if __name__ == '__main__':
     # --- Configuración ---
-    CHORDONOMICON_CSV_PATH = '/mnt/c/Users/nehem/OneDrive - Universidad de Chile/Universidad/6to año/Data/MIDI/preprocced/Chordomicon/chordonomicon_v2_filtrered.csv'
-    MIREX_MAPPING_PATH = '/mnt/c/Users/nehem/OneDrive - Universidad de Chile/Universidad/6to año/Data/MIDI/preprocced/Chordomicon/mirex_mapping_v2.csv'
-    DEGREE_MAPPING_PATH = '/mnt/c/Users/nehem/OneDrive - Universidad de Chile/Universidad/6to año/Data/MIDI/preprocced/Chordomicon/chords_mapping.csv'
-    OUTPUT_PATH = '/mnt/c/Users/nehem/OneDrive - Universidad de Chile/Universidad/6to año/Data/MIDI/preprocced/Chordomicon/'
+    CHORDONOMICON_CSV_PATH = '/home/neme/workspace/Data/MIDI/preprocced/Chordomicon/chordonomicon_v2_filtrered.csv'
+    MIREX_MAPPING_PATH = '/home/neme/workspace/Data/MIDI/preprocced/Chordomicon/mirex_mapping_v2.csv'
+    DEGREE_MAPPING_PATH = '/home/neme/workspace/Data/MIDI/preprocced/Chordomicon/chords_mapping.csv'
+    OUTPUT_PATH = '/home/neme/workspace/Data/MIDI/preprocced/Chordomicon/'
 
     NUM_PROGRESSIONS_TO_PROCESS = 100000
     SEQUENCE_LENGTH = 16
@@ -404,8 +412,8 @@ if __name__ == '__main__':
     MAX_WINDOWS_PER_PROGRESSION = 10
 
     # Reanudación concreta para el caso reportado
-    RESUME_FROM_ORIGINAL_ID = 67407  # último original_id visto
-    RESUME_WINDOWS_DONE = 2          # ya guardadas 2 ventanas de esa progresión
+    RESUME_FROM_ORIGINAL_ID = None # último original_id visto (None = desde el inicio)
+    RESUME_WINDOWS_DONE = 0          # ya guardadas 2 ventanas de esa progresión
 
     preprocessor = ChordonomiconPreprocessorResumable(
         csv_path=CHORDONOMICON_CSV_PATH,
@@ -421,8 +429,3 @@ if __name__ == '__main__':
     )
 
     result = preprocessor.process()
-    print('\n--- Último batch (parcial) ---')
-    print(f"piano_rolls: {result['piano_rolls'].shape}")
-    if len(result['chord_symbols']) > 0:
-        print(result['chord_symbols'][0])
-        print(result['metadata'].head(1))
