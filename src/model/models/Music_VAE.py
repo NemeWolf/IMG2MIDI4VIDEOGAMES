@@ -75,8 +75,7 @@ class MusicVAEModel(keras.Model):
         
     def call(self, inputs, training=None):
         """Forward pass del modelo."""
-        x, y = inputs
-        vae_input, initial_state_h, initial_state_c = x
+        vae_input, initial_state_h, initial_state_c = inputs
         z_mean, z_log_var, z = self.encoder(vae_input, training=training)
         reconstruction, _, _ = self.decoder([z, vae_input, initial_state_h, initial_state_c], training=training)
         return reconstruction 
@@ -196,18 +195,18 @@ class MusicVAE():
     def _build_encoder(self):
         """Construye el modelo del codificador."""
         # Capa de Entrada
-        inputs = layers.Input(shape=(self.sequence_length, self.features_dim), name="encoder_input")
+        inputs = layers.Input(shape=(self.sequence_length, self.features_dim), name="piano_roll_input")
 
         # Pila de LSTMs Bidireccionales para un mejor contexto
-        x = layers.Bidirectional(layers.LSTM(self.encoder_lstm_units[0], return_sequences=True), name="bi_lstm_1")(inputs)
-        x = layers.Bidirectional(layers.LSTM(self.encoder_lstm_units[1], return_sequences=True), name="bi_lstm_2")(x)
+        x = layers.Bidirectional(layers.LSTM(self.encoder_lstm_units[0], return_sequences=True, name="encoder_lstm_1"), name="bidirectional_encoder_1")(inputs)
+        x = layers.Bidirectional(layers.LSTM(self.encoder_lstm_units[1], return_sequences=True, name="encoder_lstm_2"), name="bidirectional_encoder_2")(x)
 
         # El resumen final de la secuencia
-        summary_vector = layers.Bidirectional(layers.LSTM(self.encoder_lstm_units[2]), name="bi_lstm_summary")(x)
+        summary_vector = layers.Bidirectional(layers.LSTM(self.encoder_lstm_units[2], name="encoder_lstm_summary"), name="bidirectional_encoder_summary")(x)
 
         # Capas densas para el espacio latente
-        z_mean = layers.Dense(self.latent_dim, name="z_mean")(summary_vector)
-        z_log_var = layers.Dense(self.latent_dim, name="z_log_var")(summary_vector)
+        z_mean = layers.Dense(self.latent_dim, name="latent_mean")(summary_vector)
+        z_log_var = layers.Dense(self.latent_dim, name="latent_log_variance")(summary_vector)
 
         # "Truco de la Reparametrización" para el muestreo
         def sampling(args):
@@ -219,22 +218,22 @@ class MusicVAE():
 
         z = layers.Lambda(sampling, name="z_sampling")([z_mean, z_log_var])
 
-        return keras.Model(inputs, [z_mean, z_log_var, z], name="encoder")
+        return keras.Model(inputs, [z_mean, z_log_var, z], name="hierarchical_encoder")
 
     def _build_decoder(self):
         """Construye el modelo del decodificador jerárquico y autorregresivo."""
         # --- Entradas del Decodificador ---
-        latent_input = layers.Input(shape=(self.latent_dim,), name="latent_input")
+        latent_input = layers.Input(shape=(self.latent_dim,), name="latent_vector_z")
         # Secuencia completa para el "Teacher Forcing"
-        decoder_inputs = layers.Input(shape=(self.sequence_length, self.features_dim), name="decoder_teacher_forcing_inputs")
+        decoder_inputs = layers.Input(shape=(self.sequence_length, self.features_dim), name="teacher_forcing_sequence")
         # Estados ocultos iniciales para la generación continua
-        initial_state_h = layers.Input(shape=(self.decoder_lstm_units,), name="initial_h")
-        initial_state_c = layers.Input(shape=(self.decoder_lstm_units,), name="initial_c")
+        initial_state_h = layers.Input(shape=(self.decoder_lstm_units,), name="lstm_hidden_state")
+        initial_state_c = layers.Input(shape=(self.decoder_lstm_units,), name="lstm_cell_state")
 
         # --- 1. Conductor (Crea el "Plan") ---
         # Repetimos z para que el LSTM pueda generar una secuencia de planes
-        repeated_z = layers.RepeatVector(self.sequence_length)(latent_input)
-        conductor_lstm_output = layers.LSTM(self.conductor_lstm_units, return_sequences=True, name="conductor_lstm")(repeated_z)
+        repeated_z = layers.RepeatVector(self.sequence_length, name="repeat_latent_vector")(latent_input)
+        conductor_lstm_output = layers.LSTM(self.conductor_lstm_units, return_sequences=True, name="conductor_planning_lstm")(repeated_z)
         # conductor_lstm ahora es una secuencia de N "embeddings de plan"
 
         # --- 2. Bloque Autorregresivo ---
@@ -252,7 +251,7 @@ class MusicVAE():
         return keras.Model(
             [latent_input, decoder_inputs, initial_state_h, initial_state_c],
             [decoder_output_sequence, final_h, final_c],
-            name="decoder"
+            name="hierarchical_autoregressive_decoder"
         )
 
     def _build_vae(self):

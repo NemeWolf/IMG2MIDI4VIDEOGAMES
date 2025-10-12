@@ -69,6 +69,7 @@ class PopularHookPreprocessorResumable:
         except Exception as e:
             print(f"Error leyendo emoción {emotion_csv_path}: {e}")
             return {}
+        
     def _parse_tonality_to_key(self, tonality_str: str):
         """
         Convierte string de tonalidad del dataset Popular Hook a objeto Key de music21.
@@ -77,6 +78,7 @@ class PopularHookPreprocessorResumable:
         returns:
             music21.key.Key: Objeto Key o None si no se puede parsear
         """
+        
         if not tonality_str or tonality_str.lower() in ['unknown', 'n/a', '']:
             return None
         

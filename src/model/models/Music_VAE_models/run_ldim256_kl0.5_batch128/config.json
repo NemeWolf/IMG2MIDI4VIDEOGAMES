@@ -1,0 +1,21 @@
+{
+    "model_params": {
+        "features_dim": 84,
+        "sequence_length": 16,
+        "latent_dim": 256,
+        "encoder_lstm_units": [
+            256,
+            128,
+            512
+        ],
+        "conductor_lstm_units": 256,
+        "decoder_lstm_units": 512
+    },
+    "train_params": {
+        "kl_weight": 0.5,
+        "epochs": 5,
+        "batch_size": 128
+    },
+    "use_real_augmentation": true,
+    "augmentation_factor": 2
+}
