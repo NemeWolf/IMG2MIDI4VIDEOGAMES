@@ -233,53 +233,52 @@ if __name__ == '__main__':
             except KeyboardInterrupt:
                 trainer.tensorboard_manager.stop_tensorboard(process)
     
-    # --- Experimentos ---
     
-    # experiments = [
-    #     {
-    #         "model_params": {
-    #             "features_dim": 84,
-    #             "sequence_length": 16,
-    #             "latent_dim": 256,
-    #             "encoder_lstm_units": [256, 128, 512],
-    #             "conductor_lstm_units": 256,
-    #             "decoder_lstm_units": 512,
-    #         },
-    #         "train_params": {
-    #             "kl_weight": 0.5,
-    #             "epochs": 100,
-    #             "batch_size": 128
-    #         }
-    #     },
-    # # --- Experimento 2: Espacio latente más pequeño ---
-    #     {
-    #         "model_params": {
-    #             "features_dim": 84,
-    #             "sequence_length": 16,
-    #             "latent_dim": 128,  # <--- Cambio
-    #             "encoder_lstm_units": [256, 128, 512],
-    #             "conductor_lstm_units": 256,
-    #             "decoder_lstm_units": 512,
-    #         },
-    #         "train_params": {
-    #             "kl_weight": 0.5,
-    #             "epochs": 100,
-    #             "batch_size": 128
-    #         }
-    #     },
-    # ]
+    # Cross-Validation (Descomentar para usar)
+    
+    # FINAL_DATASETS_DIR = './final_datasets/'
+    # NUM_FOLDS = 5 # Número de folds que has creado
 
-    # # --- Bucle de Ejecución de Experimentos ---
-    # for i, config in enumerate(experiments):
-    #     print(f"\n\n--- INICIANDO EXPERIMENTO {i+1}/{len(experiments)} ---")
-    #     print(json.dumps(config, indent=2))
-        
-    #     trainer = VAETrainer(config=config)
-        
-    #     try:
-    #         x_train, x_dev = trainer.load_data(TRAIN_SET_PATH, DEV_SET_PATH)
-    #         trainer.train(x_train, x_dev)
-    #     except FileNotFoundError:
-    #         print("\nERROR: No se encontraron los archivos del dataset.")
-    #         print("Asegúrate de haber ejecutado 'processing_data.py' primero y de que las rutas son correctas.")
-    #         break
+    # # --- LISTA DE EXPERIMENTOS A EJECUTAR ---
+    # experiments = {
+    #     "Baseline": {
+    #         "model_params": {"features_dim": 84, "sequence_length": 16, "latent_dim": 256, "encoder_lstm_units": [256, 128, 512], "conductor_lstm_units": 256, "decoder_lstm_units": 512},
+    #         "train_params": {"epochs": 150, "batch_size": 128, "kl_annealing": {"initial_weight": 0.0, "final_weight": 0.5, "ramp_up_epochs": 20}}
+    #     },
+    #     "Modelo_Pequeno": {
+    #         "model_params": {"features_dim": 84, "sequence_length": 16, "latent_dim": 128, "encoder_lstm_units": [128, 64, 256], "conductor_lstm_units": 128, "decoder_lstm_units": 256},
+    #         "train_params": {"epochs": 150, "batch_size": 128, "kl_annealing": {"initial_weight": 0.0, "final_weight": 0.5, "ramp_up_epochs": 20}}
+    #     },
+    #     "Latent_Grande": {
+    #         "model_params": {"features_dim": 84, "sequence_length": 16, "latent_dim": 512, "encoder_lstm_units": [256, 128, 512], "conductor_lstm_units": 256, "decoder_lstm_units": 512},
+    #         "train_params": {"epochs": 150, "batch_size": 128, "kl_annealing": {"initial_weight": 0.0, "final_weight": 0.5, "ramp_up_epochs": 20}}
+    #     }
+    # }
+
+    # # --- Bucle de Ejecución de Experimentos y Cross-Validation ---
+    # for exp_name, config in experiments.items():
+    #     for k in range(NUM_FOLDS):
+    #         print(f"\n\n{'='*20} INICIANDO EXPERIMENTO: {exp_name} | FOLD {k+1}/{NUM_FOLDS} {'='*20}")
+            
+    #         # Definir rutas de los folds
+    #         TRAIN_SET_PATH = os.path.join(FINAL_DATASETS_DIR, f'train_fold_{k}.pkl')
+    #         DEV_SET_PATH = os.path.join(FINAL_DATASETS_DIR, f'val_fold_{k}.pkl')
+
+    #         if not os.path.exists(TRAIN_SET_PATH) or not os.path.exists(DEV_SET_PATH):
+    #             print(f"ERROR: No se encontraron los archivos para el fold {k}. Saltando...")
+    #             continue
+
+    #         # Crear un nombre de run único para este experimento y fold
+    #         run_name = f"{exp_name}_fold_{k+1}"
+            
+    #         trainer = VAETrainer(config=config, run_name=run_name)
+            
+    #         try:
+    #             x_train, x_dev = trainer.load_data(TRAIN_SET_PATH, DEV_SET_PATH)
+    #             trainer.train(x_train, x_dev)
+    #         except Exception as e:
+    #             print(f"\nERROR durante el entrenamiento del fold {k} para el experimento {exp_name}: {e}")
+    #             continue # Continuar con el siguiente fold/experimento
+
+    #         # Para una prueba rápida, puedes descomentar la siguiente línea para ejecutar solo el primer fold de cada experimento
+    #         # break 
