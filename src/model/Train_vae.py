@@ -20,8 +20,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from time import time
-
+  
 # Importar paquetes personalizados
 from models.Music_VAE import MusicVAE
 from utils import reconstruct_data_from_parquet, augment_data_real
@@ -60,9 +59,17 @@ class VAETrainer:
         self.tensorboard_manager = create_tensorboard_manager(self.run_dir, self.config)
         self.visualizer = create_training_visualizer(self.run_dir)
         
-    def load_data(self, train, dev):
+    def load_data(self, train_path, dev_path):
         """Carga y prepara los datos de entrenamiento y validación."""
         print("Cargando y preparando datos...")
+
+        # Cargar datos
+        train = pd.read_parquet(train_path)
+        dev = pd.read_parquet(dev_path)
+
+        # Reconstruir datos
+        train = reconstruct_data_from_parquet(train)
+        dev = reconstruct_data_from_parquet(dev)
 
         # Extraer la columna 'piano_rolls' y convertirla a un array numpy de float32
         x_train = np.array(train['piano_rolls'].tolist(), dtype=np.float32)
@@ -70,6 +77,7 @@ class VAETrainer:
 
         print(f"Datos de entrenamiento: {x_train.shape}")
         print(f"Datos de validación: {x_dev.shape}")
+
         return x_train, x_dev
 
     def _create_model_visualization(self):
@@ -116,6 +124,7 @@ class VAETrainer:
         # --- Callbacks ---
         # Guardar el mejor modelo basado en la pérdida de validación
         checkpoint_path = os.path.join(self.run_dir, 'best_model.weights.h5')
+        
         model_checkpoint = ModelCheckpoint(
             filepath=checkpoint_path,
             monitor='val_loss',
@@ -132,7 +141,14 @@ class VAETrainer:
             restore_best_weights=True
         )
                 
-        tensorboard_callback = self.tensorboard_manager.create_callback()
+        tensorboard_callback = self.tensorboard_manager.create_callback(
+            histogram_freq=1,           # Actualizar histogramas cada época
+            write_graph=True,           # Escribir grafo
+            write_images=False,         # No imágenes (evita problemas)
+            profile_batch=0,            # Sin profiling (más rápido)
+            embeddings_freq=0,          # Sin embeddings (más rápido)
+            update_freq='batch'         # ACTUALIZAR CADA BATCH (tiempo real)
+        )
         
         print("\n--- Iniciando Entrenamiento ---")
         print(f"TensorBoard logs: {os.path.join(self.run_dir, 'logs')}")
@@ -178,107 +194,59 @@ if __name__ == '__main__':
     train_set_path = os.path.join(dataset_path, 'train_set_reduced.parquet')
     test_set_path = os.path.join(dataset_path, 'test_set_reduced.parquet')
     dev_set_path =  os.path.join(dataset_path, 'dev_set_reduced.parquet')
-
-    train_set = pd.read_parquet(train_set_path)
-    test_set = pd.read_parquet(test_set_path)
-    dev_set = pd.read_parquet(dev_set_path)
-    
-    # Reconstruir datos
-    train_set_reconstructed = reconstruct_data_from_parquet(train_set)
-    test_set_reconstructed = reconstruct_data_from_parquet(test_set)
-    dev_set_reconstructed = reconstruct_data_from_parquet(dev_set)
-
-    train_data = np.array(train_set_reconstructed['piano_rolls'].tolist())
-    test_data = np.array(test_set_reconstructed['piano_rolls'].tolist())
-    dev_data = np.array(dev_set_reconstructed['piano_rolls'].tolist())
     
     # -- Entrenamiento de Modelo --
     
     # Configuración del experimento    
     config = {
-        "model_params": {
-            "features_dim": 84,
-            "sequence_length": 16,
-            "latent_dim": 256,
-            "encoder_lstm_units": [256, 128, 512],
-            "conductor_lstm_units": 256,
-            "decoder_lstm_units": 512,
-        },
-        "train_params": {
-            "kl_weight": 0.5,
-            "epochs": 5,
-            "batch_size": 128
-        },
-        # NUEVAS OPCIONES PARA AUMENTO DE DATOS
-        "use_real_augmentation": True,  # False = transformación en tiempo real
-        "augmentation_factor": 2,       # Crear 2 versiones adicionales por muestra
-    }
+    "model_params": {
+        "features_dim": 84,
+        "sequence_length": 16,
+        "latent_dim": 96,  
+        "encoder_lstm_units": [56, 28, 224],  
+        "conductor_lstm_units": 112,  
+        "decoder_lstm_units": 224,  
+        "recurrent_dropout": 0.2,
+        "dropout_rate": 0.35,  
+        "l2_regularization": 0.00015  
+    },
+    "train_params": {
+        "kl_weight": 0.6, 
+        "epochs": 60,
+        "batch_size": 512
+    },
+    "use_real_augmentation": False,
+    "augmentation_factor": 0,
+}
 
     # Crear y ejecutar el entrenador
     trainer = VAETrainer(config=config, base_results_dir=MODEL_DIR)
+    
+    # Lanzar TensorBoard ANTES del entrenamiento
+    print("🚀 Lanzando TensorBoard...")
+    tensorboard_process = trainer.launch_tensorboard(auto_open=False) 
+        
     # Crear visualizaciones del modelo
     trainer._create_model_visualization()
-    # Iniciar el entrenamiento
+    
+    # Cargar datos
+    train_data, dev_data = trainer.load_data(train_set_path, dev_set_path)
+    
+    # Iniciar el entrenamiento (TensorBoard ya está corriendo)
+    print("\n🎯 Iniciando entrenamiento...")
+    print("📈 Ve a http://localhost:6006 para monitorear en tiempo real")    
     trainer.train(train_data, dev_data)
+    
     # Visualizar el historial de entrenamiento
     trainer.plot_training_history(save_plots=True, show_plots=True)
-    # Lanzar TensorBoard
-    print("\n¿Quieres abrir TensorBoard? (y/n)")
-    response = input().lower()
-    if response in ['y', 'yes', 'sí', 's']:
-        process = trainer.launch_tensorboard()
-        if process:
-            try:
-                process.wait()
-            except KeyboardInterrupt:
-                trainer.tensorboard_manager.stop_tensorboard(process)
     
-    
-    # Cross-Validation (Descomentar para usar)
-    
-    # FINAL_DATASETS_DIR = './final_datasets/'
-    # NUM_FOLDS = 5 # Número de folds que has creado
-
-    # # --- LISTA DE EXPERIMENTOS A EJECUTAR ---
-    # experiments = {
-    #     "Baseline": {
-    #         "model_params": {"features_dim": 84, "sequence_length": 16, "latent_dim": 256, "encoder_lstm_units": [256, 128, 512], "conductor_lstm_units": 256, "decoder_lstm_units": 512},
-    #         "train_params": {"epochs": 150, "batch_size": 128, "kl_annealing": {"initial_weight": 0.0, "final_weight": 0.5, "ramp_up_epochs": 20}}
-    #     },
-    #     "Modelo_Pequeno": {
-    #         "model_params": {"features_dim": 84, "sequence_length": 16, "latent_dim": 128, "encoder_lstm_units": [128, 64, 256], "conductor_lstm_units": 128, "decoder_lstm_units": 256},
-    #         "train_params": {"epochs": 150, "batch_size": 128, "kl_annealing": {"initial_weight": 0.0, "final_weight": 0.5, "ramp_up_epochs": 20}}
-    #     },
-    #     "Latent_Grande": {
-    #         "model_params": {"features_dim": 84, "sequence_length": 16, "latent_dim": 512, "encoder_lstm_units": [256, 128, 512], "conductor_lstm_units": 256, "decoder_lstm_units": 512},
-    #         "train_params": {"epochs": 150, "batch_size": 128, "kl_annealing": {"initial_weight": 0.0, "final_weight": 0.5, "ramp_up_epochs": 20}}
-    #     }
-    # }
-
-    # # --- Bucle de Ejecución de Experimentos y Cross-Validation ---
-    # for exp_name, config in experiments.items():
-    #     for k in range(NUM_FOLDS):
-    #         print(f"\n\n{'='*20} INICIANDO EXPERIMENTO: {exp_name} | FOLD {k+1}/{NUM_FOLDS} {'='*20}")
-            
-    #         # Definir rutas de los folds
-    #         TRAIN_SET_PATH = os.path.join(FINAL_DATASETS_DIR, f'train_fold_{k}.pkl')
-    #         DEV_SET_PATH = os.path.join(FINAL_DATASETS_DIR, f'val_fold_{k}.pkl')
-
-    #         if not os.path.exists(TRAIN_SET_PATH) or not os.path.exists(DEV_SET_PATH):
-    #             print(f"ERROR: No se encontraron los archivos para el fold {k}. Saltando...")
-    #             continue
-
-    #         # Crear un nombre de run único para este experimento y fold
-    #         run_name = f"{exp_name}_fold_{k+1}"
-            
-    #         trainer = VAETrainer(config=config, run_name=run_name)
-            
-    #         try:
-    #             x_train, x_dev = trainer.load_data(TRAIN_SET_PATH, DEV_SET_PATH)
-    #             trainer.train(x_train, x_dev)
-    #         except Exception as e:
-    #             print(f"\nERROR durante el entrenamiento del fold {k} para el experimento {exp_name}: {e}")
-    #             continue # Continuar con el siguiente fold/experimento
-
-    #         # Para una prueba rápida, puedes descomentar la siguiente línea para ejecutar solo el primer fold de cada experimento
-    #         # break 
+    # # Mantener TensorBoard corriendo
+    # if tensorboard_process:
+    #     print("\n✨ Entrenamiento completado!")
+    #     print("📊 TensorBoard sigue corriendo para analizar resultados")
+    #     print("❌ Presiona Ctrl+C para detener TensorBoard")
+    #     try:
+    #         tensorboard_process.wait()
+    #     except KeyboardInterrupt:
+    #         trainer.tensorboard_manager.stop_tensorboard(tensorboard_process)
+    #         print("🛑 TensorBoard detenido")

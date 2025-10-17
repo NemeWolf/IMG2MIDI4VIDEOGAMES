@@ -2,6 +2,7 @@
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
+import tensorflow as tf
 
 from .tensorboard_utils import TensorBoardManager, create_tensorboard_manager
 from .visualization_utils import TrainingVisualizer, create_training_visualizer

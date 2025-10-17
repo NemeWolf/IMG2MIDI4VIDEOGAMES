@@ -23,7 +23,7 @@ class TensorBoardManager:
         os.makedirs(self.log_dir, exist_ok=True)
     
     def create_callback(self, histogram_freq=1, write_graph=True, 
-                       write_images=False, profile_batch=0, embeddings_freq=0):
+                       write_images=False, profile_batch=0, embeddings_freq=0, update_freq='batch'):
         """
         Crea el callback de TensorBoard optimizado.
         
@@ -42,10 +42,10 @@ class TensorBoardManager:
             histogram_freq=histogram_freq,
             write_graph=write_graph,
             write_images=write_images,
-            update_freq='epoch',
+            update_freq=update_freq,
             profile_batch=profile_batch,
             embeddings_freq=embeddings_freq,
-            write_steps_per_second=True
+            write_steps_per_second=True,
         )
     
     def create_model_visualization(self, model_builder):

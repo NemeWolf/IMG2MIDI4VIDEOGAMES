@@ -10,40 +10,71 @@ class AutoregressiveDecoderLayer(layers.Layer):
     """
     Capa personalizada que encapsula el bucle de decodificación autorregresiva.
     """
-    def __init__(self, features_dim, conductor_lstm_units, decoder_lstm_units, sequence_length, name="autoregressive_decoder"):
+    def __init__(self, 
+                 features_dim, 
+                 conductor_lstm_units, 
+                 decoder_lstm_units, 
+                 sequence_length, 
+                 recurrent_dropout=0.0,
+                 kernel_regularizer=None,                 
+                 name="autoregressive_decoder"):
+        
         super().__init__(name=name)
         self.features_dim = features_dim
         self.conductor_lstm_units = conductor_lstm_units
         self.decoder_lstm_units = decoder_lstm_units
         self.sequence_length = sequence_length
+        self.recurrent_dropout = recurrent_dropout
+        self.kernel_regularizer = kernel_regularizer
 
-        # Las capas internas se definen UNA VEZ aquí, en el constructor.
-        self.decoder_lstm = layers.LSTM(self.decoder_lstm_units, return_sequences=False, return_state=True, name="decoder_lstm_cell")
-        self.output_dense_layer = layers.Dense(self.features_dim, activation='sigmoid', name="output_projection")
-
+       # Las capas internas se definen UNA VEZ aquí, en el constructor.
+        self.decoder_lstm = layers.LSTM(
+            self.decoder_lstm_units, 
+            return_sequences=False, 
+            return_state=True, 
+            recurrent_dropout=self.recurrent_dropout,
+            kernel_regularizer=self.kernel_regularizer,
+            name="decoder_lstm_cell")
+        
+        self.output_dense_layer = layers.Dense(
+            self.features_dim, 
+            activation='sigmoid', 
+            kernel_regularizer=self.kernel_regularizer,
+            name="output_projection")
+        
     def call(self, inputs):
         """
         Aquí ocurre la lógica del bucle for.
         """
+        # Entradas del bucle
         conductor_lstm_output, decoder_teacher_inputs, initial_state_h, initial_state_c = inputs
 
-        all_outputs = []
-        previous_chord = tf.zeros_like(decoder_teacher_inputs[:, 0, :])
-        current_states = [initial_state_h, initial_state_c]
+        all_outputs = []  # --> Almacena cada acorde generado
+        previous_chord = tf.zeros_like(decoder_teacher_inputs[:, 0, :]) # --> Inicializa el primer acorde anterior
+        current_states = [initial_state_h, initial_state_c] # --> Estados iniciales de las capas recurrentes
 
         for t in range(self.sequence_length):
+
+            # --- Establece entradas para el paso de tiempo actual ---
+
+            # Captura el embedding del conductor en el paso de tiempo actual
             plan_t = conductor_lstm_output[:, t, :]
 
+            # Captura el acorde del paso de tiempo anterior
             if t > 0:
                 previous_chord = decoder_teacher_inputs[:, t-1, :]
 
+            # Concatena las entradas
             lstm_input = layers.concatenate([previous_chord, plan_t], axis=-1)
-            lstm_input = tf.expand_dims(lstm_input, 1)
+            lstm_input = tf.expand_dims(lstm_input, 1)  # --> Es necesario anhadir una dimension de tiempo para compatibilidad
 
-            lstm_output, h, c = self.decoder_lstm(lstm_input, initial_state=current_states)
+            # --- Capa decoder autorregresivo ---
+            lstm_output, h, c = self.decoder_lstm(lstm_input, initial_state=current_states) 
             current_states = [h, c]
 
+            # --- Mapea la salida con una capa densa ---
             output_t = self.output_dense_layer(lstm_output)
+          
             all_outputs.append(output_t)
 
         output_sequence = tf.stack(all_outputs, axis=1)
@@ -163,7 +194,11 @@ class MusicVAE():
                  encoder_lstm_units=[128, 64, 256],
                  conductor_lstm_units=128,
                  decoder_lstm_units=256,
-                 kl_weight=0.5):
+                 kl_weight=0.5,
+                 recurrent_dropout=0.0,
+                 dropout_rate=0.0,
+                 l2_regularization=0.0
+                 ):
         """
         Inicializa y construye la arquitectura completa del VAE.
 
@@ -175,6 +210,9 @@ class MusicVAE():
             conductor_lstm_units (int): Unidades para la capa LSTM del Conductor.
             decoder_lstm_units (int): Unidades para la capa LSTM del Decodificador principal.
             kl_weight (float): Peso para la pérdida de divergencia KL en la pérdida total.
+            recurrent_dropout (float): Dropout para las conexiones recurrentes.
+            dropout_rate (float): Dropout para las conexiones feed-forward.
+            l2_regularization (float): Penalización L2 para las capas densas y LSTM.
         """
         self.features_dim = features_dim
         self.sequence_length = sequence_length
@@ -184,6 +222,14 @@ class MusicVAE():
         self.decoder_lstm_units = decoder_lstm_units
         self.kl_weight = kl_weight
 
+        # Parametros de regularizacion
+        self.recurrent_dropout = recurrent_dropout
+        self.dropout_rate = dropout_rate
+        self.l2_regularization = l2_regularization
+
+        # Creamos el regularizador si se especificó un valor
+        self.regularizer = keras.regularizers.l2(self.l2_regularization) if self.l2_regularization > 0 else None
+        
         # Construir los componentes del modelo
         self.encoder = self._build_encoder()
         self.decoder = self._build_decoder()
@@ -193,20 +239,51 @@ class MusicVAE():
         self._compile_vae()
 
     def _build_encoder(self):
-        """Construye el modelo del codificador."""
+        """Construye el modelo del codificador."""             
+        
+        # --- Creamo arquitectura ---
+
         # Capa de Entrada
         inputs = layers.Input(shape=(self.sequence_length, self.features_dim), name="piano_roll_input")
 
         # Pila de LSTMs Bidireccionales para un mejor contexto
-        x = layers.Bidirectional(layers.LSTM(self.encoder_lstm_units[0], return_sequences=True, name="encoder_lstm_1"), name="bidirectional_encoder_1")(inputs)
-        x = layers.Bidirectional(layers.LSTM(self.encoder_lstm_units[1], return_sequences=True, name="encoder_lstm_2"), name="bidirectional_encoder_2")(x)
+        x = layers.Bidirectional(layers.LSTM(
+            self.encoder_lstm_units[0], 
+            return_sequences=True, 
+            recurrent_dropout=self.recurrent_dropout,
+            kernel_regularizer=self.regularizer
+            ), name="encoder_lstm_1")(inputs)
+
+        x = layers.Bidirectional(layers.LSTM(
+            self.encoder_lstm_units[1], 
+            return_sequences=True, 
+            recurrent_dropout=self.recurrent_dropout,
+            kernel_regularizer=self.regularizer
+            ), name="encoder_lstm_2")(x)
 
         # El resumen final de la secuencia
-        summary_vector = layers.Bidirectional(layers.LSTM(self.encoder_lstm_units[2], name="encoder_lstm_summary"), name="bidirectional_encoder_summary")(x)
+        summary_vector = layers.Bidirectional(layers.LSTM(
+            self.encoder_lstm_units[2], 
+            recurrent_dropout=self.recurrent_dropout,
+            kernel_regularizer=self.regularizer
+            ), name="encoder_lstm_summary")(x)
+
+        # --- Aplicamos Dropout estándar antes de las capas densas ---
+        if self.dropout_rate > 0:
+            summary_vector = layers.Dropout(self.dropout_rate)(summary_vector)
 
         # Capas densas para el espacio latente
-        z_mean = layers.Dense(self.latent_dim, name="latent_mean")(summary_vector)
-        z_log_var = layers.Dense(self.latent_dim, name="latent_log_variance")(summary_vector)
+        z_mean = layers.Dense(
+            self.latent_dim, 
+            name="latent_mean",
+            kernel_regularizer=self.regularizer
+            )(summary_vector)
+
+        z_log_var = layers.Dense(
+            self.latent_dim,
+            name="latent_log_variance",
+            kernel_regularizer=self.regularizer
+            )(summary_vector)
 
         # "Truco de la Reparametrización" para el muestreo
         def sampling(args):
@@ -224,8 +301,10 @@ class MusicVAE():
         """Construye el modelo del decodificador jerárquico y autorregresivo."""
         # --- Entradas del Decodificador ---
         latent_input = layers.Input(shape=(self.latent_dim,), name="latent_vector_z")
+
         # Secuencia completa para el "Teacher Forcing"
         decoder_inputs = layers.Input(shape=(self.sequence_length, self.features_dim), name="teacher_forcing_sequence")
+        
         # Estados ocultos iniciales para la generación continua
         initial_state_h = layers.Input(shape=(self.decoder_lstm_units,), name="lstm_hidden_state")
         initial_state_c = layers.Input(shape=(self.decoder_lstm_units,), name="lstm_cell_state")
@@ -233,14 +312,23 @@ class MusicVAE():
         # --- 1. Conductor (Crea el "Plan") ---
         # Repetimos z para que el LSTM pueda generar una secuencia de planes
         repeated_z = layers.RepeatVector(self.sequence_length, name="repeat_latent_vector")(latent_input)
-        conductor_lstm_output = layers.LSTM(self.conductor_lstm_units, return_sequences=True, name="conductor_planning_lstm")(repeated_z)
-        # conductor_lstm ahora es una secuencia de N "embeddings de plan"
+        conductor_lstm_output = layers.LSTM(
+            self.conductor_lstm_units, 
+            return_sequences=True,
+            recurrent_dropout=self.recurrent_dropout,
+            kernel_regularizer=self.regularizer, 
+            name="conductor_planning_lstm"
+            )(repeated_z)
 
         # --- 2. Bloque Autorregresivo ---
         # Creamos una instancia de nuestra capa personalizada
         autoregressive_block = AutoregressiveDecoderLayer(
-            self.features_dim, self.conductor_lstm_units,
-            self.decoder_lstm_units, self.sequence_length
+            features_dim=self.features_dim, 
+            conductor_lstm_units=self.conductor_lstm_units,
+            decoder_lstm_units=self.decoder_lstm_units, 
+            sequence_length=self.sequence_length,
+            recurrent_dropout=self.recurrent_dropout,
+            kernel_regularizer=self.regularizer
         )
 
         # La llamamos como si fuera una única función
